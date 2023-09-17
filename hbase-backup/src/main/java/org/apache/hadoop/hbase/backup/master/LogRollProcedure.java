@@ -26,13 +26,19 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Optional;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotEnabledException;
 import org.apache.hadoop.hbase.backup.impl.BackupSystemTable;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.master.TableStateManager;
+import org.apache.hadoop.hbase.master.procedure.CreateNamespaceProcedure;
+import org.apache.hadoop.hbase.master.procedure.CreateTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
 import org.apache.hadoop.hbase.master.procedure.TableProcedureInterface;
 import org.apache.hadoop.hbase.procedure2.ProcedureStateSerializer;
@@ -40,6 +46,7 @@ import org.apache.hadoop.hbase.procedure2.ProcedureSuspendedException;
 import org.apache.hadoop.hbase.procedure2.ProcedureYieldException;
 import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+import org.apache.hadoop.hbase.util.ModifyRegionUtils;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,30 +73,35 @@ public class LogRollProcedure extends StateMachineProcedure<MasterProcedureEnv, 
   }
 
   @Override
-  protected LockState acquireLock(final MasterProcedureEnv env) {
-    if (env.getProcedureScheduler().waitTableSharedLock(this, getTableName())) {
-      return LockState.LOCK_EVENT_WAIT;
-    }
-    return LockState.LOCK_ACQUIRED;
-  }
-
-  @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureScheduler().wakeTableSharedLock(this, getTableName());
-  }
-
-  @Override
   protected Flow executeFromState(MasterProcedureEnv env, LogRollState state)
     throws ProcedureSuspendedException, ProcedureYieldException, InterruptedException {
     LOG.info("{} execute state={}", this, state);
 
     try {
       switch (state) {
-        case LOG_ROLL_PRE_CHECK:
+        case LOG_ROLL_PRE_CHECK_NAMESPACE:
+          // create backup namespace if not exists
+          if (
+            !env.getMasterServices().getClusterSchema().getTableNamespaceManager()
+              .doesNamespaceExist(getTableName().getNamespaceAsString())
+          ) {
+            NamespaceDescriptor desc =
+              NamespaceDescriptor.create(getTableName().getNamespaceAsString()).build();
+            addChildProcedure(new CreateNamespaceProcedure(env, desc));
+          }
+          setNextState(LogRollState.LOG_ROLL_PRE_CHECK_TABLES);
+          return Flow.HAS_MORE_STATE;
+        case LOG_ROLL_PRE_CHECK_TABLES:
+          // create backup system table and backup system bulkload table if not exists
+          List<CreateTableProcedure> toCreate = new ArrayList<>();
           TableStateManager tsm = env.getMasterServices().getTableStateManager();
-          TableState tableState = tsm.getTableState(getTableName());
-          if (!tableState.isEnabled()) {
-            throw new TableNotEnabledException(getTableName() + " is in state " + tableState);
+          createIfNeeded(env, tsm, BackupSystemTable.getTableName(conf),
+            BackupSystemTable.getSystemTableDescriptor(conf)).ifPresent(toCreate::add);
+          createIfNeeded(env, tsm, BackupSystemTable.getTableNameForBulkLoadedData(conf),
+            BackupSystemTable.getSystemTableForBulkLoadedDataDescriptor(conf))
+              .ifPresent(toCreate::add);
+          if (!toCreate.isEmpty()) {
+            addChildProcedure(toCreate.toArray(new CreateTableProcedure[0]));
           }
           setNextState(LogRollState.LOG_ROLL_ROLL_LOG_ON_EACH_RS);
           return Flow.HAS_MORE_STATE;
@@ -120,9 +132,24 @@ public class LogRollProcedure extends StateMachineProcedure<MasterProcedureEnv, 
     return Flow.NO_MORE_STATE;
   }
 
+  private Optional<CreateTableProcedure> createIfNeeded(MasterProcedureEnv env,
+    TableStateManager tsm, TableName tableName, TableDescriptor desc) throws IOException {
+    if (tsm.isTablePresent(tableName)) {
+      TableState state = tsm.getTableState(tableName);
+      if (state.isEnabled()) {
+        return Optional.empty();
+      } else {
+        throw new TableNotEnabledException("table=" + tableName + ", state=" + state);
+      }
+    } else {
+      RegionInfo[] regions = ModifyRegionUtils.createRegionInfos(desc, new byte[][] {});
+      return Optional.of(new CreateTableProcedure(env, desc, regions));
+    }
+  }
+
   @Override
   protected void rollbackState(MasterProcedureEnv env, LogRollState state) {
-    throw new UnsupportedOperationException();
+    // nothing to rollback
   }
 
   @Override
@@ -137,7 +164,7 @@ public class LogRollProcedure extends StateMachineProcedure<MasterProcedureEnv, 
 
   @Override
   protected LogRollState getInitialState() {
-    return LogRollState.LOG_ROLL_ROLL_LOG_ON_EACH_RS;
+    return LogRollState.LOG_ROLL_PRE_CHECK_NAMESPACE;
   }
 
   @Override

@@ -17,7 +17,9 @@
  */
 package org.apache.hadoop.hbase.backup.util;
 
+import static org.apache.hadoop.hbase.HConstants.DEFAULT_HBASE_CLIENT_PAUSE;
 import static org.apache.hadoop.hbase.HConstants.DEFAULT_HBASE_RPC_TIMEOUT;
+import static org.apache.hadoop.hbase.HConstants.HBASE_CLIENT_PAUSE;
 import static org.apache.hadoop.hbase.HConstants.HBASE_RPC_TIMEOUT_KEY;
 import static org.apache.hadoop.hbase.backup.master.LogRollMasterProcedureManager.ROLLLOG_PROCEDURE_ID;
 import static org.apache.hadoop.hbase.backup.master.LogRollMasterProcedureManager.ROLLLOG_PROCEDURE_NAME;
@@ -782,14 +784,15 @@ public final class BackupUtils {
     }
 
     // keep asking if procedure is finished until it times out
+    Configuration conf = admin.getConfiguration();
     long start = EnvironmentEdgeManager.currentTime();
-    long rpcTimeoutMs =
-      admin.getConfiguration().getLong(HBASE_RPC_TIMEOUT_KEY, DEFAULT_HBASE_RPC_TIMEOUT);
+    long rpcTimeoutMs = conf.getLong(HBASE_RPC_TIMEOUT_KEY, DEFAULT_HBASE_RPC_TIMEOUT);
+    long pauseTimeMs = conf.getLong(HBASE_CLIENT_PAUSE, DEFAULT_HBASE_CLIENT_PAUSE);
 
     int tries = 0;
     boolean done = false;
     while ((EnvironmentEdgeManager.currentTime() - start) < rpcTimeoutMs && !done) {
-      Threads.sleep(ConnectionUtils.getPauseTime(rpcTimeoutMs, tries++));
+      Threads.sleep(ConnectionUtils.getPauseTime(pauseTimeMs, tries++));
       done = admin.isProcedureFinished(ROLLLOG_PROCEDURE_SIGNATURE, ROLLLOG_PROCEDURE_NAME, props);
     }
     if (!done) {
