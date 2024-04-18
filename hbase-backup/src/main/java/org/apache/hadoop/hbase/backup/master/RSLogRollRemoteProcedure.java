@@ -33,6 +33,9 @@ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.BackupProtos.RSLogRollParameter;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.BackupProtos.RSLogRollRemoteData;
 
+/**
+ * The remote procedure to perform WAL rolling on the specific RegionServer without retrying.
+ */
 @InterfaceAudience.Private
 public class RSLogRollRemoteProcedure extends ServerRemoteProcedure
   implements ServerProcedureInterface {

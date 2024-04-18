@@ -707,7 +707,7 @@ public final class BackupSystemTable implements Closeable {
    * @param backupRoot root directory path to backup
    * @throws IOException exception
    */
-  public Long getRegionServerLastLogRollResult(String server, String backupRoot)
+  public long getRegionServerLastLogRollResult(String server, String backupRoot)
     throws IOException {
     try (Table table = connection.getTable(tableName)) {
       Get get = createGetForRegionServerLastLogRollResult(server, backupRoot);

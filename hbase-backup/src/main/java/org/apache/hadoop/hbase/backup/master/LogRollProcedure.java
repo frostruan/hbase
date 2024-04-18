@@ -36,6 +36,8 @@ import org.apache.hadoop.hbase.backup.impl.BackupSystemTable;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.client.TableState;
+import org.apache.hadoop.hbase.master.ServerListener;
+import org.apache.hadoop.hbase.master.ServerManager;
 import org.apache.hadoop.hbase.master.TableStateManager;
 import org.apache.hadoop.hbase.master.procedure.CreateNamespaceProcedure;
 import org.apache.hadoop.hbase.master.procedure.CreateTableProcedure;
@@ -54,6 +56,9 @@ import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.BackupProtos.LogRollData;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.BackupProtos.LogRollState;
 
+/**
+ * The procedure to perform WAL rolling on all of RegionServers.
+ */
 @InterfaceAudience.Private
 public class LogRollProcedure extends StateMachineProcedure<MasterProcedureEnv, LogRollState>
   implements TableProcedureInterface {
@@ -106,8 +111,10 @@ public class LogRollProcedure extends StateMachineProcedure<MasterProcedureEnv, 
           setNextState(LogRollState.LOG_ROLL_ROLL_LOG_ON_EACH_RS);
           return Flow.HAS_MORE_STATE;
         case LOG_ROLL_ROLL_LOG_ON_EACH_RS:
-          final List<ServerName> onlineServers =
-            env.getMasterServices().getServerManager().getOnlineServersList();
+          final ServerManager serverManager = env.getMasterServices().getServerManager();
+          // avoid potential new region server missing
+          serverManager.registerListener(new NewServerWALRoller(env, backupRoot));
+          final List<ServerName> onlineServers = serverManager.getOnlineServersList();
           final List<RSLogRollProcedure> subProcedures = new ArrayList<>(onlineServers.size());
           final BackupSystemTable table =
             new BackupSystemTable(env.getMasterServices().getConnection());
@@ -115,21 +122,44 @@ public class LogRollProcedure extends StateMachineProcedure<MasterProcedureEnv, 
             table.readRegionServerLastLogRollResult(backupRoot);
           final long now = EnvironmentEdgeManager.currentTime();
           for (ServerName server : onlineServers) {
-            long lastLogRollResult =
+            long lastLogRollTime =
               lastLogRollResults.getOrDefault(server.getAddress().toString(), Long.MIN_VALUE);
-            if (lastLogRollResult > now) {
-              LOG.warn("Bad lastLogRollResult={}. reset lastLogRollResult.", lastLogRollResult);
-              lastLogRollResult = Long.MIN_VALUE;
+            if (lastLogRollTime > now) {
+              LOG.warn("Bad lastLogRollTime={}. reset lastLogRollResult.", lastLogRollTime);
+              lastLogRollTime = Long.MIN_VALUE;
             }
-            subProcedures.add(new RSLogRollProcedure(server, backupRoot, lastLogRollResult));
+            subProcedures.add(new RSLogRollProcedure(server, backupRoot, lastLogRollTime));
           }
           addChildProcedure(subProcedures.toArray(new RSLogRollProcedure[0]));
+          setNextState(LogRollState.LOG_ROLL_AFTER_RS_ROLL);
+          return Flow.HAS_MORE_STATE;
+        case LOG_ROLL_AFTER_RS_ROLL:
+          env.getMasterServices().getServerManager()
+            .unregisterListenerIf(l -> l instanceof NewServerWALRoller);
           return Flow.NO_MORE_STATE;
       }
     } catch (Exception e) {
       setFailure("log-roll", e);
     }
     return Flow.NO_MORE_STATE;
+  }
+
+  private static final class NewServerWALRoller implements ServerListener {
+
+    private final MasterProcedureEnv env;
+
+    private final String backupRoot;
+
+    public NewServerWALRoller(MasterProcedureEnv env, String backupRoot) {
+      this.env = env;
+      this.backupRoot = backupRoot;
+    }
+
+    @Override
+    public void serverAdded(ServerName server) {
+      env.getMasterServices().getMasterProcedureExecutor()
+        .submitProcedure(new RSLogRollProcedure(server, backupRoot, Long.MIN_VALUE));
+    }
   }
 
   private Optional<CreateTableProcedure> createIfNeeded(MasterProcedureEnv env,
@@ -201,6 +231,8 @@ public class LogRollProcedure extends StateMachineProcedure<MasterProcedureEnv, 
       return;
     }
     this.conf = conf;
+    env.getMasterServices().getServerManager()
+      .registerListener(new NewServerWALRoller(env, backupRoot));
   }
 
   @Override

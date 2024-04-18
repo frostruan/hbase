@@ -37,6 +37,10 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.BackupProtos.RSLogRollD
 import org.apache.hadoop.hbase.shaded.protobuf.generated.BackupProtos.RSLogRollState;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureState;
 
+/**
+ * The procedure to perform WAL rolling on the specific RegionServer. It will keep retrying until
+ * succeed.
+ */
 @InterfaceAudience.Private
 public class RSLogRollProcedure extends StateMachineProcedure<MasterProcedureEnv, RSLogRollState>
   implements ServerProcedureInterface {
